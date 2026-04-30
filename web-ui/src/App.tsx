@@ -365,7 +365,7 @@ function App() {
           className="flex flex-col bg-surface-raised overflow-hidden"
           style={{ width: `${100 - splitPercent}%` }}
         >
-          <VisualizationPanel trialState={trial.state} />
+          <VisualizationPanel trialState={trial.state} videoUrl={trial.videoUrl} />
         </div>
       </main>
     </div>

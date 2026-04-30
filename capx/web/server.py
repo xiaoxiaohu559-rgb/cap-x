@@ -346,6 +346,14 @@ def create_app() -> FastAPI:
             }
         return {"session_id": None}
 
+    @app.get("/api/video/{path:path}")
+    async def serve_video(path: str):
+        """Serve a trial video file from the outputs directory."""
+        video_path = Path("outputs") / path
+        if not video_path.exists() or not video_path.suffix == ".mp4":
+            raise HTTPException(404, "Video not found")
+        return FileResponse(str(video_path), media_type="video/mp4")
+
     # ========================================================================
     # WebSocket Endpoint
     # ========================================================================

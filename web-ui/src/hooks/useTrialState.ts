@@ -15,6 +15,7 @@ interface TrialState {
   configPath: string | null;
   taskPrompt: string | null;
   error: string | null;
+  videoUrl: string | null;
 }
 
 interface ActiveSessionResponse {
@@ -50,6 +51,7 @@ export function useTrialState(): UseTrialStateReturn {
     configPath: null,
     taskPrompt: null,
     error: null,
+    videoUrl: null,
   });
 
   const addMessage = useCallback((message: Omit<ChatMessage, 'id'>) => {
@@ -342,6 +344,9 @@ export function useTrialState(): UseTrialStateReturn {
             taskCompleted: event.task_completed,
             summary: event.summary,
           });
+          if (event.video_url) {
+            setTrialState((prev) => ({ ...prev, videoUrl: event.video_url ?? null }));
+          }
           break;
 
         case 'error':
@@ -474,7 +479,6 @@ export function useTrialState(): UseTrialStateReturn {
 
   const reset = useCallback(() => {
     disconnect();
-    // Keep configPath and taskPrompt so user can retry without reloading
     setTrialState((prev) => ({
       sessionId: null,
       state: 'idle',
@@ -482,6 +486,7 @@ export function useTrialState(): UseTrialStateReturn {
       configPath: prev.configPath,
       taskPrompt: prev.taskPrompt,
       error: null,
+      videoUrl: null,
     }));
   }, [disconnect]);
 
@@ -494,6 +499,7 @@ export function useTrialState(): UseTrialStateReturn {
       configPath: null,
       taskPrompt: null,
       error: null,
+      videoUrl: null,
     });
   }, [disconnect]);
 

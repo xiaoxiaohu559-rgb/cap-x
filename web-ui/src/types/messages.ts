@@ -117,6 +117,7 @@ export interface TrialCompleteEvent extends WSEventBase {
   num_regenerations: number;
   num_code_blocks: number;
   summary: string;
+  video_url?: string | null;
 }
 
 export interface StateUpdateEvent extends WSEventBase {

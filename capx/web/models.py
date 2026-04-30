@@ -177,6 +177,7 @@ class TrialCompleteEvent(WSEventBase):
     num_regenerations: int
     num_code_blocks: int
     summary: str
+    video_url: str | None = None
 
 
 class StateUpdateEvent(WSEventBase):

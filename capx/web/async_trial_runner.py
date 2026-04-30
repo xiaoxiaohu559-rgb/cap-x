@@ -129,18 +129,29 @@ async def run_trial_async(
             message="Initializing environment...",
         ))
         # Force enable_render and viser for the web UI so users get 3D visualization
+        import sys as _sys
+        _is_macos = _sys.platform == "darwin"
         if "cfg" in session.env_factory:
             session.env_factory["cfg"]["enable_render"] = True
-            session.env_factory["cfg"]["viser_debug"] = True
+            # Viser 3D viewer requires GL on the main thread; skip on macOS
+            if not _is_macos:
+                session.env_factory["cfg"]["viser_debug"] = True
 
-        # Use a single-worker thread pool for ALL env operations so that MuJoCo's
-        # thread-local osmesa GL context is always available for rendering.
-        import concurrent.futures
-        env_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="env")
-        loop = asyncio.get_running_loop()
+        if _is_macos:
+            # macOS GLFW requires OpenGL context creation on the main thread.
+            # Run MuJoCo operations synchronously (blocks the event loop briefly
+            # but is the only way to get offscreen rendering on macOS).
+            async def run_in_env_thread(func, *args):
+                return func(*args)
+        else:
+            # Use a single-worker thread pool for ALL env operations so that MuJoCo's
+            # thread-local osmesa GL context is always available for rendering.
+            import concurrent.futures
+            env_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="env")
+            loop = asyncio.get_running_loop()
 
-        async def run_in_env_thread(func, *args):
-            return await loop.run_in_executor(env_executor, func, *args)
+            async def run_in_env_thread(func, *args):
+                return await loop.run_in_executor(env_executor, func, *args)
 
         logger.info(f"Instantiating environment for session {session.session_id}")
         env = await run_in_env_thread(instantiate, session.env_factory)
@@ -872,6 +883,7 @@ async def run_trial_async(
                 logger.info(f"Saved {len(all_exec_histories)} execution histories to: {exec_history_dir}")
 
             # Save video if configured
+            video_url = None
             if session.config.get("record_video") and hasattr(env, "get_video_frames"):
                 frames = env.get_video_frames(clear=True)
                 if frames:
@@ -885,6 +897,12 @@ async def run_trial_async(
                         video_dir,
                         suffix=f"{reward:.3f}",
                     )
+                    # Build video URL for frontend playback
+                    video_filename = f"video_{reward:.3f}.mp4"
+                    rel_video_path = os.path.relpath(
+                        os.path.join(video_dir, video_filename), "outputs"
+                    )
+                    video_url = f"/api/video/{rel_video_path}"
         else:
             logger.info("No output_dir configured, skipping artifact save")
 
@@ -903,6 +921,7 @@ async def run_trial_async(
             num_regenerations=num_regenerations,
             num_code_blocks=len(code_blocks),
             summary="\n".join(log_lines),
+            video_url=video_url,
         ))
         await emit(StateUpdateEvent(
             session_id=session.session_id,
