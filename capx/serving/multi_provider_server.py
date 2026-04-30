@@ -189,16 +189,26 @@ async def _call_anthropic(
     }
 
     url = f"{base_url.rstrip('/')}/v1/messages"
+    logger.info(f"Anthropic request: model={model}, messages={len(messages)}, max_tokens={body.get('max_tokens')}")
 
-    resp = await client.post(
-        url,
-        headers=headers,
-        json=body,
-        timeout=300.0,
-    )
-
-    if resp.status_code != 200:
-        raise HTTPException(status_code=resp.status_code, detail=f"Anthropic API error: {resp.text}")
+    import asyncio as _aio
+    last_error = ""
+    for attempt in range(3):
+        resp = await client.post(
+            url,
+            headers=headers,
+            json=body,
+            timeout=300.0,
+        )
+        if resp.status_code == 200:
+            break
+        last_error = resp.text
+        logger.warning(f"Anthropic API attempt {attempt+1} failed ({resp.status_code}): {last_error}")
+        if resp.status_code < 500 and resp.status_code != 429:
+            raise HTTPException(status_code=resp.status_code, detail=f"Anthropic API error: {last_error}")
+        await _aio.sleep(2 ** attempt)
+    else:
+        raise HTTPException(status_code=resp.status_code, detail=f"Anthropic API error after retries: {last_error}")
 
     data = resp.json()
 
@@ -247,6 +257,8 @@ def create_app(
     @app.post("/chat/completions")
     async def chat_completions(request: ChatCompletionRequest):
         model = request.model
+        logger.info(f"Request: model={model}, msgs={len(request.messages)}, "
+                     f"max_tokens={request.max_tokens}, stream={request.stream}")
 
         # ── Anthropic ──
         if model.startswith("anthropic/"):
