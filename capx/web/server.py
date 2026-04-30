@@ -22,6 +22,7 @@ from capx.envs.configs.instantiate import instantiate
 from capx.utils.launch_utils import _load_config
 from capx.web.async_trial_runner import LaunchArgsCompat, run_trial_async
 from capx.web.models import (
+    ConfigItem,
     ConfigListResponse,
     InjectPromptCommand,
     LoadConfigRequest,
@@ -104,18 +105,33 @@ def create_app() -> FastAPI:
     @app.get("/api/configs", response_model=ConfigListResponse)
     async def list_configs():
         """List available YAML config files from all environment directories."""
+        import sys as _sys
+        is_macos = _sys.platform == "darwin"
+
         configs_root = Path("env_configs")
         if not configs_root.exists():
             return ConfigListResponse(configs=[])
 
         configs = []
-        for yaml_file in configs_root.rglob("*.yaml"):
-            # Skip hillclimb subdirectories (internal experiment configs)
+        for yaml_file in sorted(configs_root.rglob("*.yaml")):
             if "hillclimb" in yaml_file.parts:
                 continue
-            configs.append(str(yaml_file.relative_to(".")))
+            path = str(yaml_file.relative_to("."))
+            available = True
+            reason = None
 
-        configs.sort()
+            if is_macos:
+                name = yaml_file.name
+                parent = yaml_file.parent.name
+                if parent in ("libero", "r1pro", "real"):
+                    available = False
+                    reason = "Requires Linux (LIBERO/Isaac Sim/Real Robot)"
+                elif "privileged" not in name:
+                    available = False
+                    reason = "Requires SAM3/ContactGraspNet (Linux GPU)"
+
+            configs.append(ConfigItem(path=path, available=available, reason=reason))
+
         return ConfigListResponse(configs=configs)
 
     @app.post("/api/load-config", response_model=LoadConfigResponse)

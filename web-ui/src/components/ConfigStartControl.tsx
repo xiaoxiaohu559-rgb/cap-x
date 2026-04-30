@@ -1,11 +1,17 @@
 import { useState, useEffect, useMemo } from 'react';
 import type { SessionState, StartTrialRequest } from '../types/messages';
 
+interface ConfigEntry {
+  path: string;
+  available: boolean;
+  reason?: string | null;
+}
+
 /** Group configs by their parent directory for a cleaner dropdown. */
-function groupConfigs(configs: string[]): Map<string, string[]> {
-  const groups = new Map<string, string[]>();
+function groupConfigs(configs: ConfigEntry[]): Map<string, ConfigEntry[]> {
+  const groups = new Map<string, ConfigEntry[]>();
   for (const config of configs) {
-    const parts = config.split('/');
+    const parts = config.path.split('/');
     const category = parts.length >= 3 ? parts[1] : 'other';
     if (!groups.has(category)) groups.set(category, []);
     groups.get(category)!.push(config);
@@ -47,7 +53,7 @@ export function ConfigStartControl({
   temperature,
   awaitUserInput,
 }: ConfigStartControlProps) {
-  const [configs, setConfigs] = useState<string[]>([]);
+  const [configs, setConfigs] = useState<ConfigEntry[]>([]);
   const [selectedConfig, setSelectedConfig] = useState<string>('');
   const [loading, setLoading] = useState(false);
 
@@ -60,7 +66,12 @@ export function ConfigStartControl({
     fetch('/api/configs')
       .then((res) => res.json())
       .then((data) => {
-        setConfigs(data.configs || []);
+        const raw = data.configs || [];
+        // Support both old format (string[]) and new format (ConfigEntry[])
+        const entries: ConfigEntry[] = raw.map((c: string | ConfigEntry) =>
+          typeof c === 'string' ? { path: c, available: true } : c
+        );
+        setConfigs(entries);
       })
       .catch((err) => console.error('Failed to fetch configs:', err));
   }, []);
@@ -111,11 +122,16 @@ export function ConfigStartControl({
           className="appearance-none pl-3 pr-8 py-1.5 bg-surface-sunken border border-surface-border rounded-md text-sm text-text-primary min-w-0 sm:min-w-[280px] w-full sm:w-auto focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent disabled:opacity-50 transition-colors cursor-pointer"
         >
           <option value="">Select a config...</option>
-          {[...grouped.entries()].map(([category, paths]) => (
+          {[...grouped.entries()].map(([category, entries]) => (
             <optgroup key={category} label={categoryLabel(category)}>
-              {paths.map((config) => (
-                <option key={config} value={config}>
-                  {config.split('/').pop()?.replace('.yaml', '')}
+              {entries.map((config) => (
+                <option
+                  key={config.path}
+                  value={config.path}
+                  disabled={!config.available}
+                >
+                  {config.path.split('/').pop()?.replace('.yaml', '')}
+                  {!config.available && config.reason ? ` (${config.reason})` : ''}
                 </option>
               ))}
             </optgroup>

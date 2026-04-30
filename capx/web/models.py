@@ -230,10 +230,18 @@ class ResumeCommand(WSCommandBase):
 # ============================================================================
 
 
+class ConfigItem(BaseModel):
+    """A single config entry with availability info."""
+
+    path: str
+    available: bool = True
+    reason: str | None = None
+
+
 class ConfigListResponse(BaseModel):
     """Response for listing available configs."""
 
-    configs: list[str]
+    configs: list[ConfigItem]
 
 
 class LoadConfigRequest(BaseModel):
