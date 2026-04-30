@@ -25,7 +25,9 @@ from capx.envs.simulators.robosuite_base import RobosuiteBaseEnv
 from capx.utils.camera_utils import obs_get_rgb
 from capx.utils.depth_utils import depth_color_to_pointcloud
 
-os.environ.setdefault("MUJOCO_GL", "egl")
+import sys
+
+os.environ.setdefault("MUJOCO_GL", "glfw" if sys.platform == "darwin" else "egl")
 
 
 class FrankaRobosuiteNutAssembly(RobosuiteBaseEnv):

@@ -9,6 +9,8 @@ venv/
 env/
 .env
 .openrouterkey
+.anthropickey
+.deepseekkey
 .nvinferencekeys
 .capx_skills.json
 .pytest_cache/

@@ -3,7 +3,10 @@ import time
 from typing import Any
 
 import numpy as np
-import open3d as o3d
+try:
+    import open3d as o3d
+except ImportError:
+    o3d = None
 import viser.transforms as vtf
 from PIL import Image, ImageDraw
 from scipy.spatial.transform import Rotation as SciRotation

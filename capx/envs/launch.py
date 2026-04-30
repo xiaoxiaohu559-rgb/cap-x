@@ -27,7 +27,9 @@ import tyro
 
 from capx.utils.launch_utils import _load_config
 
-os.environ.setdefault("MUJOCO_GL", "egl")
+import sys
+
+os.environ.setdefault("MUJOCO_GL", "glfw" if sys.platform == "darwin" else "egl")
 
 
 # ---------------------------------------------------------------------------
