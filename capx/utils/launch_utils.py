@@ -183,8 +183,28 @@ def _extract_code(content: str) -> list[str]:
         content = content[:end_idx]
 
     content = content.strip()
-    # NOTE: might gen empty code block at the end
-    # content_list = content.split("breakpoint_code_block()")
+
+    # If content doesn't parse as Python, try to extract code more aggressively.
+    # LLMs sometimes prepend explanatory text before the actual code.
+    import ast
+    try:
+        ast.parse(content)
+    except SyntaxError:
+        # Try stripping leading non-code lines (text before first import/from/def/class/# or assignment)
+        lines = content.splitlines()
+        code_start = 0
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if (stripped.startswith(("import ", "from ", "def ", "class ", "#", "@"))
+                    or "=" in stripped
+                    or stripped.startswith(("for ", "while ", "if ", "try:", "with "))
+                    or stripped.startswith(("api.", "env.", "robot.", "print(", "result"))):
+                code_start = i
+                break
+        if code_start > 0:
+            content = "\n".join(lines[code_start:]).strip()
 
     return [content]
 
