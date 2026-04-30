@@ -234,6 +234,7 @@ class ConfigItem(BaseModel):
     """A single config entry with availability info."""
 
     path: str
+    label: str | None = None
     available: bool = True
     reason: str | None = None
 

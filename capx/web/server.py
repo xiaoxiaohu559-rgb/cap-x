@@ -102,6 +102,23 @@ def create_app() -> FastAPI:
             "auto_start": default_path is not None,
         }
 
+    _CONFIG_LABELS: dict[str, str] = {
+        "franka_robosuite_cube_stack_privileged": "方块堆叠",
+        "franka_robosuite_cube_lifting_privileged": "方块抬举",
+        "franka_robosuite_cube_restack_privileged": "方块重新堆叠",
+        "franka_robosuite_nut_assembly_privileged": "螺母组装",
+        "franka_robosuite_spill_wipe_privileged": "溢出擦拭",
+        "franka_robosuite_two_arm_lift_privileged": "双臂抬举",
+        "two_arm_handover_privileged": "双臂交接",
+        "franka_robosuite_cube_stack_privileged_oracle": "方块堆叠 (Oracle)",
+        "franka_robosuite_cube_lifting_privileged_oracle": "方块抬举 (Oracle)",
+        "franka_robosuite_cube_restack_privileged_oracle": "方块重新堆叠 (Oracle)",
+        "franka_robosuite_nut_assembly_privileged_oracle": "螺母组装 (Oracle)",
+        "franka_robosuite_spill_wipe_privileged_oracle": "溢出擦拭 (Oracle)",
+        "franka_robosuite_two_arm_lift_privileged_oracle": "双臂抬举 (Oracle)",
+        "two_arm_handover_privileged_oracle": "双臂交接 (Oracle)",
+    }
+
     @app.get("/api/configs", response_model=ConfigListResponse)
     async def list_configs():
         """List available YAML config files from all environment directories."""
@@ -125,12 +142,15 @@ def create_app() -> FastAPI:
                 parent = yaml_file.parent.name
                 if parent in ("libero", "r1pro", "real"):
                     available = False
-                    reason = "Requires Linux (LIBERO/Isaac Sim/Real Robot)"
+                    reason = "需要 Linux (LIBERO/Isaac Sim/真实机器人)"
                 elif "privileged" not in name:
                     available = False
-                    reason = "Requires SAM3/ContactGraspNet (Linux GPU)"
+                    reason = "需要 SAM3/ContactGraspNet (Linux GPU)"
 
-            configs.append(ConfigItem(path=path, available=available, reason=reason))
+            stem = yaml_file.stem
+            label = _CONFIG_LABELS.get(stem)
+
+            configs.append(ConfigItem(path=path, label=label, available=available, reason=reason))
 
         return ConfigListResponse(configs=configs)
 

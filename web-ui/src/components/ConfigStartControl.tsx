@@ -3,6 +3,7 @@ import type { SessionState, StartTrialRequest } from '../types/messages';
 
 interface ConfigEntry {
   path: string;
+  label?: string | null;
   available: boolean;
   reason?: string | null;
 }
@@ -130,7 +131,9 @@ export function ConfigStartControl({
                   value={config.path}
                   disabled={!config.available}
                 >
-                  {config.path.split('/').pop()?.replace('.yaml', '')}
+                  {config.label
+                    ? `${config.label} — ${config.path.split('/').pop()?.replace('.yaml', '')}`
+                    : config.path.split('/').pop()?.replace('.yaml', '')}
                   {!config.available && config.reason ? ` (${config.reason})` : ''}
                 </option>
               ))}
