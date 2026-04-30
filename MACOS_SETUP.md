@@ -162,6 +162,60 @@ Oracle code 版本在 `env_configs/human_oracle_code/robosuite/` 下。
 
 ---
 
+## 快速启动（一键脚本）
+
+安装完成后，使用 `scripts/start_macos.sh` 一键启动所有服务：
+
+```bash
+# 启动 Web UI（默认，浏览器打开 http://localhost:8200）
+bash scripts/start_macos.sh
+
+# 使用 DeepSeek 模型
+bash scripts/start_macos.sh --model deepseek/deepseek-chat
+
+# 指定任务配置
+bash scripts/start_macos.sh --config env_configs/nut_assembly/franka_robosuite_nut_assembly_privileged.yaml
+
+# 无头模式（CLI 直接运行）
+bash scripts/start_macos.sh --headless
+
+# 停止所有服务
+bash scripts/start_macos.sh --stop
+```
+
+脚本会自动：
+1. 启动 PyRoKi IK Server（端口 8116）
+2. 启动 LLM Proxy（端口 8110，支持 `anthropic/*` 和 `deepseek/*`）
+3. 构建前端（首次运行自动安装 Node.js 20）
+4. 启动 Web UI（端口 8200）或无头试验
+
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `MODEL` | `anthropic/claude-sonnet-4-6` | LLM 模型名 |
+| `CONFIG` | `franka_robosuite_cube_stack_privileged.yaml` | 任务配置文件 |
+
+### API Key 配置
+
+将 API Key 放在项目根目录的文件中：
+
+```bash
+echo "your-anthropic-key" > .anthropickey
+echo "your-deepseek-key"  > .deepseekkey
+```
+
+### Web UI 功能
+
+- 在页面下拉框选择任务配置
+- 设置模型名称和 Server URL
+- 输入自然语言指令执行仿真
+- 实时查看 LLM 生成的代码和执行结果
+- 3D Viser 可视化 + 视频回放
+- 支持多轮对话，每轮可审查/注入提示
+
+---
+
 ## 验证结果
 
 在 macOS ARM64 (Darwin 25.3.0, Apple Silicon) 上测试通过：
