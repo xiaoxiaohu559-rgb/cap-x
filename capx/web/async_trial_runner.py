@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import copy
 import gc
+import json
 import logging
 import os
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from capx.envs.configs.instantiate import instantiate
@@ -35,6 +37,7 @@ from capx.web.models import (
     EnvironmentInitEvent,
     ErrorEvent,
     ExecutionStepEvent,
+    GraspAnalysisEvent,
     ImageAnalysisEvent,
     ModelResponseEvent,
     ModelStreamingDeltaEvent,
@@ -73,6 +76,37 @@ class LaunchArgsCompat:
     visual_differencing_model: str | None
     visual_differencing_model_server_url: str | None
     visual_differencing_model_api_key: str | None
+
+
+_GRASP_LOG_PATH = Path("outputs/grasp_log.jsonl")
+
+
+def _build_grasp_analysis() -> tuple[str | None, list[dict]]:
+    """Read the grasp log and return (summary_text, raw_entries)."""
+    if not _GRASP_LOG_PATH.exists():
+        return None, []
+    entries = []
+    for line in _GRASP_LOG_PATH.read_text().splitlines():
+        if line.strip():
+            entries.append(json.loads(line))
+    if not entries:
+        return None, []
+    successes = sum(1 for e in entries if e["success"])
+    failures = len(entries) - successes
+    lines = [f"Grasp History ({successes} succeeded, {failures} failed):"]
+    for e in entries:
+        status = "OK" if e["success"] else "FAIL"
+        lines.append(
+            f"  [{status}] {e['object_name']} attempt#{e['attempt']} "
+            f"grasp_pos={e['grasp_pos']} obj_z_after={e.get('object_z_after_lift')} "
+            f"grip_z_after={e.get('gripper_z_after_lift')}"
+        )
+    if failures:
+        lines.append(
+            "Hint: for failed grasps, adjust XY offset, lower z_approach, "
+            "or use pick_object() which auto-retries."
+        )
+    return "\n".join(lines), entries
 
 
 async def run_trial_async(
@@ -154,10 +188,12 @@ async def run_trial_async(
                 return await loop.run_in_executor(env_executor, func, *args)
 
         logger.info(f"Instantiating environment for session {session.session_id}")
+        logger.info(f"env_factory cfg.prompt = {session.env_factory.get('cfg', {}).get('prompt', '<not set>')}")
         env = await run_in_env_thread(instantiate, session.env_factory)
 
         # Store env reference in session for safety interrupt
         session.env = env
+        logger.info(f"env._task_prompt = {getattr(env, '_task_prompt', '<no attr>')[:200]}")
 
         # Enable web UI logging on all API instances
         if hasattr(env, "_apis"):
@@ -207,9 +243,18 @@ async def run_trial_async(
             description_content=actual_task_prompt,
         ))
 
-        # Enable video capture if configured
-        if session.config.get("record_video") and hasattr(env, "enable_video_capture"):
+        # Enable video capture — always for web UI so the right panel can show playback
+        if hasattr(env, "enable_video_capture"):
+            # Use lower resolution & coarser subsampling for faster sim in web mode
+            low_level = getattr(env, "low_level_env", env)
+            if hasattr(low_level, "_render_width"):
+                low_level._render_width = 256
+                low_level._render_height = 256
+            if hasattr(low_level, "_subsample_rate"):
+                low_level._subsample_rate = 10
             env.enable_video_capture(True, clear=True)
+            if not session.config.get("record_video"):
+                session.config["record_video"] = True
 
         # Initialize tracking variables
         raw_code = None
@@ -222,6 +267,10 @@ async def run_trial_async(
         visual_feedback_imgs = []
         visual_feedback_base64_history: list[str] = []
         stderr_history: list[str] = []
+
+        # Clear grasp log for fresh trial
+        if _GRASP_LOG_PATH.exists():
+            _GRASP_LOG_PATH.unlink()
 
         info_step = {"sandbox_rc": -1, "stdout": "", "stderr": "", "task_completed": False}
         reward = 0.0
@@ -444,7 +493,6 @@ async def run_trial_async(
             code = code_blocks[code_block_idx]
             session.current_block_index = code_block_idx
 
-            # Check for cancellation before executing (safety check)
             if is_cancelled():
                 raise asyncio.CancelledError("Cancelled before code execution")
 
@@ -579,6 +627,18 @@ async def run_trial_async(
                     console_stdout=info_step["stdout"],
                     console_stderr=info_step["stderr"],
                 )
+
+                grasp_summary, grasp_entries = _build_grasp_analysis()
+                if grasp_summary:
+                    complete_multi_turn_prompt += f"\n\n{grasp_summary}"
+                    successes = sum(1 for e in grasp_entries if e["success"])
+                    await emit(GraspAnalysisEvent(
+                        session_id=session.session_id,
+                        total_attempts=len(grasp_entries),
+                        successes=successes,
+                        failures=len(grasp_entries) - successes,
+                        attempts=grasp_entries,
+                    ))
 
                 if info_step["stderr"]:
                     stderr_history.append(info_step["stderr"])
@@ -815,6 +875,230 @@ async def run_trial_async(
 
             logger.info(f"Code block {code_block_idx} done, {len(code_blocks)} total blocks")
 
+        # ====================================================================
+        # Post-loop: if multi_turn_prompt is set and all blocks finished
+        # without the LLM choosing FINISH, give user one last chance to
+        # provide feedback and trigger regeneration.
+        # ====================================================================
+        if multi_turn_prompt and code_block_idx >= len(code_blocks) and num_finishes == 0:
+            executed_code = "# All executed code blocks:\n"
+            for block_idx in range(len(code_blocks)):
+                executed_code += f"# Code block {block_idx}\n{code_blocks[block_idx]}\n"
+
+            complete_multi_turn_prompt = multi_turn_prompt.format(
+                executed_code=executed_code,
+                console_stdout=info_step.get("stdout", ""),
+                console_stderr=info_step.get("stderr", ""),
+            )
+
+            grasp_summary, grasp_entries = _build_grasp_analysis()
+            if grasp_summary:
+                complete_multi_turn_prompt += f"\n\n{grasp_summary}"
+                successes = sum(1 for e in grasp_entries if e["success"])
+                await emit(GraspAnalysisEvent(
+                    session_id=session.session_id,
+                    total_attempts=len(grasp_entries),
+                    successes=successes,
+                    failures=len(grasp_entries) - successes,
+                    attempts=grasp_entries,
+                ))
+
+            if info_step.get("stderr"):
+                stderr_history.append(info_step["stderr"])
+
+            if session.await_user_input_each_turn:
+                while not session.user_injection_queue.empty():
+                    try:
+                        session.user_injection_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+
+                session.state = SessionState.AWAITING_USER_INPUT
+                await emit(StateUpdateEvent(
+                    session_id=session.session_id,
+                    state=SessionState.AWAITING_USER_INPUT,
+                ))
+                await emit(UserPromptRequestEvent(
+                    session_id=session.session_id,
+                    current_state_summary=f"Executed all {len(code_blocks)} code block(s). Reward: {reward:.3f}",
+                    executed_code_blocks=len(code_blocks),
+                ))
+
+                try:
+                    user_text = await asyncio.wait_for(
+                        session.user_injection_queue.get(),
+                        timeout=300.0,
+                    )
+                    if user_text:
+                        complete_multi_turn_prompt += f"\n\nUser feedback: {user_text}"
+                        logger.info(f"Post-loop user injected: {user_text[:100]}...")
+                except asyncio.TimeoutError:
+                    logger.info("Post-loop user input timeout, finishing trial")
+
+                session.state = SessionState.RUNNING
+                await emit(StateUpdateEvent(
+                    session_id=session.session_id,
+                    state=SessionState.RUNNING,
+                ))
+
+            if not is_cancelled():
+                turn_number += 1
+                await emit(ModelStreamingStartEvent(
+                    session_id=session.session_id,
+                    phase=ThinkingPhase.MULTI_TURN,
+                    turn_number=turn_number,
+                    model_name=args.model,
+                ))
+
+                # Capture post-execution frame for visual feedback
+                post_loop_frame_b64 = None
+                try:
+                    frame = await run_in_env_thread(lambda: env.render() if hasattr(env, "render") else None)
+                    if frame is not None:
+                        from PIL import Image as _Image
+                        import io as _io, base64 as _b64
+                        img = _Image.fromarray(frame)
+                        buf = _io.BytesIO()
+                        img.save(buf, format="png")
+                        post_loop_frame_b64 = f"data:image/png;base64,{_b64.b64encode(buf.getvalue()).decode('utf-8')}"
+                except Exception:
+                    pass
+
+                multi_turn_decision_prompt = _build_multi_turn_decision_prompt(
+                    obs, complete_multi_turn_prompt, post_loop_frame_b64, None
+                )
+
+                mt_chunk_queue_post: asyncio.Queue = asyncio.Queue()
+                mt_main_loop_post = asyncio.get_running_loop()
+
+                def stream_multiturn_post():
+                    try:
+                        for chunk in _query_model_streaming(args, multi_turn_decision_prompt):
+                            asyncio.run_coroutine_threadsafe(
+                                mt_chunk_queue_post.put(chunk), mt_main_loop_post
+                            )
+                    except Exception as e:
+                        asyncio.run_coroutine_threadsafe(
+                            mt_chunk_queue_post.put({"type": "error", "error": str(e)}),
+                            mt_main_loop_post,
+                        )
+
+                mt_stream_task_post = mt_main_loop_post.run_in_executor(None, stream_multiturn_post)
+
+                mt_content_post = ""
+                mt_reasoning_post = None
+
+                while True:
+                    if is_cancelled():
+                        break
+                    try:
+                        chunk = await asyncio.wait_for(mt_chunk_queue_post.get(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        if mt_stream_task_post.done():
+                            break
+                        continue
+
+                    if chunk["type"] == "content_delta":
+                        await emit(ModelStreamingDeltaEvent(
+                            session_id=session.session_id,
+                            content_delta=chunk["content"],
+                        ))
+                        mt_content_post += chunk["content"]
+                    elif chunk["type"] == "reasoning_delta":
+                        await emit(ModelStreamingDeltaEvent(
+                            session_id=session.session_id,
+                            reasoning_delta=chunk["content"],
+                        ))
+                        mt_reasoning_post = (mt_reasoning_post or "") + chunk["content"]
+                    elif chunk["type"] == "done":
+                        break
+                    elif chunk["type"] == "error":
+                        logger.error(f"Post-loop streaming error: {chunk['error']}")
+                        break
+
+                await mt_stream_task_post
+
+                if mt_content_post:
+                    decision_post, new_code_post = _parse_multi_turn_decision(mt_content_post)
+                else:
+                    decision_post, new_code_post = "finish", None
+
+                if decision_post == "regenerate" and new_code_post:
+                    logger.info("Post-loop: model chose to regenerate")
+                    new_blocks = _extract_code(new_code_post)
+
+                    await emit(ModelStreamingEndEvent(
+                        session_id=session.session_id,
+                        content=mt_content_post,
+                        reasoning=mt_reasoning_post,
+                        code_blocks=new_blocks,
+                        decision=DecisionType.REGENERATE,
+                    ))
+
+                    code_blocks.extend(new_blocks)
+                    code_block_metadata.extend([
+                        {"generation": num_regenerations + 1, "regenerated": True, "regenerated_at_idx": code_block_idx}
+                    ] * len(new_blocks))
+                    num_regenerations += 1
+                    session.num_regenerations = num_regenerations
+                    session.total_code_blocks = len(code_blocks)
+
+                    # Re-enter the execution loop for new blocks
+                    while code_block_idx < len(code_blocks) and code_block_idx <= MULTITURN_LIMIT:
+                        if is_cancelled():
+                            break
+                        regen_code = code_blocks[code_block_idx]
+                        session.current_block_index = code_block_idx
+
+                        await emit(CodeExecutionStartEvent(
+                            session_id=session.session_id,
+                            block_index=code_block_idx,
+                            code=regen_code,
+                        ))
+
+                        execution_logger.init_execution_context(
+                            code_block_index=code_block_idx,
+                            emit_callback=emit_execution_step,
+                        )
+                        try:
+                            exec_timeout = getattr(session, 'execution_timeout', 180)
+                            (obs_next, reward, terminated, truncated, info_step), post_step_frame = await asyncio.wait_for(
+                                run_in_env_thread(_step_render_with_interrupt, regen_code),
+                                timeout=exec_timeout,
+                            )
+                        except asyncio.TimeoutError:
+                            await emit(CodeExecutionResultEvent(
+                                session_id=session.session_id,
+                                block_index=code_block_idx,
+                                success=False, stdout="",
+                                stderr=f"Execution timed out after {exec_timeout} seconds.",
+                                reward=0.0, task_completed=False,
+                            ))
+                            break
+                        finally:
+                            execution_logger.finalize_execution_context()
+
+                        await emit(CodeExecutionResultEvent(
+                            session_id=session.session_id,
+                            block_index=code_block_idx,
+                            success=info_step["sandbox_rc"] == 0,
+                            stdout=info_step["stdout"],
+                            stderr=info_step["stderr"],
+                            reward=reward,
+                            task_completed=info_step.get("task_completed"),
+                        ))
+                        code_block_idx += 1
+                        obs = obs_next
+                else:
+                    await emit(ModelStreamingEndEvent(
+                        session_id=session.session_id,
+                        content=mt_content_post,
+                        reasoning=mt_reasoning_post,
+                        code_blocks=[],
+                        decision=DecisionType.FINISH,
+                    ))
+                    num_finishes += 1
+
         # ========================================================================
         # Trial complete
         # ========================================================================
@@ -855,6 +1139,7 @@ async def run_trial_async(
 
         # Save artifacts if output_dir configured
         code_path = None
+        video_url = None
         output_dir = session.config.get("output_dir")
         if output_dir:
             logger.info(f"Saving trial artifacts to: {output_dir}")
@@ -876,20 +1161,18 @@ async def run_trial_async(
             # Save execution histories
             all_exec_histories = execution_logger.get_all_histories()
             if all_exec_histories:
-                from pathlib import Path
                 exec_history_dir = Path(output_dir) / "execution_history"
                 for history in all_exec_histories:
                     await asyncio.to_thread(history.save_to_directory, exec_history_dir)
                 logger.info(f"Saved {len(all_exec_histories)} execution histories to: {exec_history_dir}")
 
             # Save video if configured
-            video_url = None
             if session.config.get("record_video") and hasattr(env, "get_video_frames"):
                 frames = env.get_video_frames(clear=True)
                 if frames:
                     video_dir = os.path.join(
                         output_dir,
-                        f"trial_{trial:02d}_sandboxrc_{info_step['sandbox_rc']}_reward_{reward:.3f}_taskcompleted_{int(info_step.get('task_completed', False))}",
+                        f"trial_{trial:02d}_sandboxrc_{info_step['sandbox_rc']}_reward_{reward:.3f}_taskcompleted_{int(info_step.get('task_completed') or False)}",
                     )
                     await asyncio.to_thread(
                         _write_video,
@@ -906,10 +1189,30 @@ async def run_trial_async(
         else:
             logger.info("No output_dir configured, skipping artifact save")
 
+        # Save video even without output_dir — use a default location so the frontend can play it
+        if video_url is None and session.config.get("record_video") and hasattr(env, "get_video_frames"):
+            frames = env.get_video_frames(clear=True)
+            if frames:
+                default_video_dir = os.path.join("outputs", "web_videos", session.session_id)
+                os.makedirs(default_video_dir, exist_ok=True)
+                await asyncio.to_thread(
+                    _write_video,
+                    frames,
+                    default_video_dir,
+                    suffix=f"{reward:.3f}",
+                )
+                video_filename = f"video_{reward:.3f}.mp4"
+                rel_video_path = os.path.relpath(
+                    os.path.join(default_video_dir, video_filename), "outputs"
+                )
+                video_url = f"/api/video/{rel_video_path}"
+
         # Success if the environment reports task completion or termination with positive reward,
-        # OR if the model explicitly chose to finish in multi-turn mode.
+        # OR if the model explicitly chose to finish in multi-turn mode,
+        # OR if all code blocks executed without errors (sandbox_rc == 0).
         task_completed = bool(info_step.get("task_completed", False)) or (terminated and reward > 0)
-        success = task_completed or num_finishes > 0
+        code_executed_ok = info_step.get("sandbox_rc", 1) == 0
+        success = task_completed or num_finishes > 0 or code_executed_ok
 
         # Emit completion
         session.state = SessionState.COMPLETE

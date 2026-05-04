@@ -395,6 +395,56 @@ export function ChatMessageComponent({ message }: ChatMessageComponentProps) {
         </div>
       );
 
+    case 'grasp_analysis': {
+      const attempts = message.graspAttempts || [];
+      const suc = message.graspSuccesses ?? 0;
+      const fail = message.graspFailures ?? 0;
+      const allOk = fail === 0;
+
+      return (
+        <div className={`rounded-lg border msg-enter ${allOk ? 'bg-nv-green/5 border-nv-green/20' : 'bg-amber-950/20 border-amber-700/30'}`}>
+          {/* Header */}
+          <div className="flex items-center gap-2.5 px-4 py-2.5 border-b border-inherit">
+            <div className={`w-6 h-6 rounded flex items-center justify-center ${allOk ? 'bg-nv-green/15' : 'bg-amber-600/15'}`}>
+              <svg className={`w-3.5 h-3.5 ${allOk ? 'text-nv-green' : 'text-amber-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 11.5V14m0-2.5v-6a1.5 1.5 0 113 0m-3 6a1.5 1.5 0 00-3 0v2a7.5 7.5 0 0015 0v-5a1.5 1.5 0 00-3 0m-6-3V11m0-5.5v-1a1.5 1.5 0 013 0v1m0 0V11m0-5.5a1.5 1.5 0 013 0v3m0 0V11" />
+              </svg>
+            </div>
+            <span className="text-xs font-display font-semibold uppercase tracking-wide" style={{ color: allOk ? 'var(--nv-green)' : '#f59e0b' }}>
+              Grasp Analysis
+            </span>
+            <div className="flex items-center gap-2 ml-auto text-xs font-mono">
+              <span className="text-nv-green">{suc} OK</span>
+              {fail > 0 && <span className="text-red-400">{fail} FAIL</span>}
+            </div>
+          </div>
+          {/* Attempt rows */}
+          <div className="px-4 py-2 space-y-1.5">
+            {attempts.map((a, idx) => (
+              <div
+                key={idx}
+                className={`flex items-center gap-3 text-xs py-1.5 px-2.5 rounded ${
+                  a.success ? 'bg-nv-green/5' : 'bg-red-950/30'
+                }`}
+              >
+                <span className={`inline-block w-1.5 h-1.5 rounded-full flex-shrink-0 ${a.success ? 'bg-nv-green' : 'bg-red-400'}`} />
+                <span className="font-mono text-text-primary flex-shrink-0">{a.object_name}</span>
+                <span className="text-text-tertiary">#{a.attempt}</span>
+                <span className="text-text-tertiary font-mono ml-auto">
+                  pos=[{a.grasp_pos.map(v => v.toFixed(3)).join(', ')}]
+                </span>
+                {!a.success && a.object_z_after_lift != null && a.gripper_z_after_lift != null && (
+                  <span className="text-red-400 font-mono">
+                    dz={Math.abs(a.gripper_z_after_lift - a.object_z_after_lift).toFixed(3)}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
     case 'user_prompt':
       return (
         <div className="flex items-start gap-3 justify-end msg-enter-right">

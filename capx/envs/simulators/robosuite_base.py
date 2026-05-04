@@ -132,6 +132,8 @@ class RobosuiteBaseEnv(BaseEnv):
 
     def _do_robosuite_step(self, action: np.ndarray) -> None:
         """Step robosuite with the given action, handling render skipping."""
+        if getattr(self.robosuite_env, "done", False):
+            return
         sliced = action[:self._ACTION_SLICE] if self._ACTION_SLICE != 0 else action
         need_render = (self._record_frames and self._sim_step_count % self._subsample_rate == 0) or hasattr(self, "viser_server")
         if need_render:
@@ -188,6 +190,8 @@ class RobosuiteBaseEnv(BaseEnv):
 
         steps = 0
         while steps < max_steps:
+            if getattr(self.robosuite_env, "done", False):
+                break
             robosuite_obs = self.robosuite_env._get_observations()
             current = np.array(robosuite_obs["robot0_joint_pos"], dtype=np.float64)
 

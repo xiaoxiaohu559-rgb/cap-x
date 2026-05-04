@@ -11,6 +11,8 @@ try:
     from .robosuite_cube_lift import FrankaRobosuiteCubeLiftLowLevel
     from .robosuite_cubes import FrankaRobosuiteCubesLowLevel
     from .robosuite_cubes_restack import FrankaRobosuiteCubesRestackLowLevel
+    from .robosuite_multi_objects import FrankaRobosuiteMultiObjectsLowLevel
+    from .robosuite_multi_cubes import FrankaRobosuiteMultiCubesLowLevel
     from .robosuite_spill_wipe import FrankaRobosuiteSpillWipeLowLevel
     from .robosuite_handover import RobosuiteHandoverEnv
     from .robosuite_two_arm_lift import RobosuiteTwoArmLiftEnv
@@ -20,6 +22,8 @@ try:
     register_env("franka_robosuite_cube_lift_low_level", FrankaRobosuiteCubeLiftLowLevel)
     register_env("franka_robosuite_cubes_low_level", FrankaRobosuiteCubesLowLevel)
     register_env("franka_robosuite_cubes_restack_low_level", FrankaRobosuiteCubesRestackLowLevel)
+    register_env("franka_robosuite_multi_cubes_low_level", FrankaRobosuiteMultiCubesLowLevel)
+    register_env("franka_robosuite_multi_objects_low_level", FrankaRobosuiteMultiObjectsLowLevel)
     register_env("franka_robosuite_spill_wipe_low_level", FrankaRobosuiteSpillWipeLowLevel)
 
 

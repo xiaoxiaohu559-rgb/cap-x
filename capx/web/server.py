@@ -10,6 +10,14 @@ from pathlib import Path
 from typing import Any
 from urllib.request import urlopen, Request as UrlRequest
 
+# Bypass proxy for local services (IK solver, LLM server, etc.)
+_no_proxy = os.environ.get("NO_PROXY", "")
+for host in ("127.0.0.1", "localhost", "::1"):
+    if host not in _no_proxy:
+        _no_proxy = f"{host},{_no_proxy}" if _no_proxy else host
+os.environ["NO_PROXY"] = _no_proxy
+os.environ["no_proxy"] = _no_proxy
+
 import tyro
 import uvicorn
 from dataclasses import dataclass
@@ -40,6 +48,571 @@ from capx.web.session_manager import Session, get_session_manager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Text-mode helpers: parse environment descriptions → object specs
+# ---------------------------------------------------------------------------
+import re as _re
+from typing import Any as _Any
+
+_COLOUR_MAP_ZH: dict[str, str] = {
+    "红": "red", "红色": "red",
+    "绿": "green", "绿色": "green",
+    "蓝": "blue", "蓝色": "blue",
+    "橙": "orange", "橙色": "orange", "橘": "orange", "橘色": "orange",
+    "黄": "yellow", "黄色": "yellow",
+    "黑": "black", "黑色": "black",
+    "白": "white", "白色": "white",
+    "粉": "pink", "粉色": "pink", "粉红": "pink", "粉红色": "pink",
+    "紫": "purple", "紫色": "purple",
+    "灰": "gray", "灰色": "gray",
+    "棕": "brown", "棕色": "brown", "褐": "brown", "褐色": "brown",
+    "青": "cyan", "青色": "cyan",
+}
+_COLOUR_MAP_EN: dict[str, str] = {
+    "red": "red", "green": "green", "blue": "blue",
+    "orange": "orange", "yellow": "yellow", "black": "black", "white": "white",
+    "pink": "pink", "purple": "purple", "gray": "gray", "grey": "gray",
+    "brown": "brown", "cyan": "cyan",
+}
+
+_ZH_DIGITS: dict[str, int] = {
+    "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+}
+
+# Object type vocabularies (Chinese / English → canonical type key)
+_OBJECT_TYPE_MAP_ZH: dict[str, str] = {
+    "方块": "box", "积木": "box", "立方体": "box", "盒子": "box",
+    "球": "ball", "球体": "ball",
+    "圆柱": "cylinder", "柱体": "cylinder", "柱子": "cylinder",
+    "瓶子": "bottle", "瓶": "bottle",
+    "易拉罐": "can", "罐子": "can", "罐": "can",
+    "牛奶盒": "milk", "牛奶": "milk",
+    "面包": "bread",
+    "麦片盒": "cereal", "麦片": "cereal",
+    "锥体": "cone", "圆锥": "cone",
+    "柠檬": "lemon",
+}
+_OBJECT_TYPE_MAP_EN: dict[str, str] = {
+    "cube": "box", "cubes": "box", "box": "box", "boxes": "box",
+    "block": "box", "blocks": "box",
+    "ball": "ball", "balls": "ball", "sphere": "ball", "spheres": "ball",
+    "cylinder": "cylinder", "cylinders": "cylinder",
+    "bottle": "bottle", "bottles": "bottle",
+    "can": "can", "cans": "can",
+    "cone": "cone", "cones": "cone",
+}
+
+# Types that accept colour/material
+_COLOURABLE_TYPES = {"box", "ball", "cylinder", "cone"}
+
+# Human-readable type names (for prompt generation)
+_TYPE_DISPLAY: dict[str, str] = {
+    "box": "cube", "ball": "ball", "cylinder": "cylinder",
+    "cone": "cone", "bottle": "bottle", "can": "can",
+    "milk": "milk carton", "bread": "bread", "cereal": "cereal box",
+    "lemon": "lemon",
+}
+
+_ZH_COLOUR_RE = r"(红色?|绿色?|蓝色?|橙色?|橘色?|黄色?|黑色?|白色?|粉红色?|粉色?|粉|紫色?|灰色?|棕色?|褐色?|青色?)"
+# Build regex for ZH object types (longest first to avoid partial match)
+_ZH_OBJ_TYPES_SORTED = sorted(_OBJECT_TYPE_MAP_ZH.keys(), key=len, reverse=True)
+_ZH_OBJ_RE = r"(" + "|".join(_re.escape(t) for t in _ZH_OBJ_TYPES_SORTED) + r")"
+
+
+def _zh_to_int(raw: str) -> int:
+    """Convert a Chinese or Arabic numeral string to int."""
+    return _ZH_DIGITS.get(raw, None) or int(raw)
+
+
+def _parse_object_specs(user_instruction: str) -> list[dict[str, _Any]]:
+    """Extract object type/colour/count specs from Chinese or English text.
+
+    Returns a list of dicts with keys ``name``, ``type``, and optionally
+    ``colour``.  Returns an empty list if nothing recognised.
+    """
+    # (count, type_key, colour_or_None)
+    specs: list[tuple[int, str, str | None]] = []
+    _num = r"(\d+|[一二两三四五六七八九十])"
+
+    # ── Pattern A: "红色，绿色，橙色各三个[球/方块/...]" ──────────────
+    ge_pat = _re.compile(
+        r"(?:" + _ZH_COLOUR_RE + r"[，,、和及]\s*)+"
+        + _ZH_COLOUR_RE
+        + r"\s*各\s*" + _num + r"\s*(?:个|块)"
+        + r"(?:\s*" + _ZH_OBJ_RE + r")?",
+    )
+    for m in ge_pat.finditer(user_instruction):
+        count = _zh_to_int(m.group(m.lastindex - 1) if m.lastindex and m.group(m.lastindex) in _OBJECT_TYPE_MAP_ZH else m.group(m.lastindex))
+        # Detect object type from trailing noun or default to box
+        span_text = m.group(0)
+        obj_type = "box"
+        for ot in _ZH_OBJ_TYPES_SORTED:
+            if ot in span_text:
+                obj_type = _OBJECT_TYPE_MAP_ZH[ot]
+                break
+        # Find count — it's after 各
+        count_m = _re.search(r"各\s*" + _num, span_text)
+        if count_m:
+            count = _zh_to_int(count_m.group(1))
+        for cm in _re.finditer(_ZH_COLOUR_RE, span_text.split("各")[0]):
+            colour = _COLOUR_MAP_ZH.get(cm.group(1))
+            if colour:
+                specs.append((count, obj_type, colour))
+
+    # ── Pattern A2: "瓶子、锥体、积木各五个" (object types + 各 + count) ─
+    ge_obj_pat = _re.compile(
+        r"(?:" + _ZH_OBJ_RE + r"[，,、和及]\s*)+"
+        + _ZH_OBJ_RE
+        + r"\s*各\s*" + _num + r"\s*个",
+    )
+    for m in ge_obj_pat.finditer(user_instruction):
+        span_text = m.group(0)
+        count_m = _re.search(r"各\s*" + _num, span_text)
+        count = _zh_to_int(count_m.group(1)) if count_m else 1
+        for om in _re.finditer(_ZH_OBJ_RE, span_text.split("各")[0]):
+            obj_type = _OBJECT_TYPE_MAP_ZH.get(om.group(1), "box")
+            if not any(t == obj_type for _, t, _ in specs):
+                specs.append((count, obj_type, None))
+
+    # ── Pattern B: "3个红色方块/球/圆柱/瓶子" ────────────────────────
+    zh_pat = _re.compile(
+        _num + r"\s*个\s*" + _ZH_COLOUR_RE + r"\s*"
+        r"(?:的\s*)?" + _ZH_OBJ_RE,
+        _re.IGNORECASE,
+    )
+    for m in zh_pat.finditer(user_instruction):
+        count = _zh_to_int(m.group(1))
+        colour = _COLOUR_MAP_ZH.get(m.group(2))
+        obj_type = _OBJECT_TYPE_MAP_ZH.get(m.group(3), "box")
+        key = (obj_type, colour)
+        if key not in {(t, c) for _, t, c in specs}:
+            specs.append((count, obj_type, colour))
+
+    # ── Pattern B2: "3个瓶子", "10个多种颜色的瓶子" (no specific colour) ─
+    zh_pat_nocolour = _re.compile(
+        _num + r"\s*个\s*(?:[^\d一二两三四五六七八九十]{0,8}?)" + _ZH_OBJ_RE,
+    )
+    for m in zh_pat_nocolour.finditer(user_instruction):
+        count = _zh_to_int(m.group(1))
+        obj_type = _OBJECT_TYPE_MAP_ZH.get(m.group(2), "box")
+        if not any(t == obj_type and c is None for _, t, c in specs):
+            specs.append((count, obj_type, None))
+
+    # ── Pattern C: "N个颜色" without object noun (方块/积木 elsewhere) ─
+    if not specs:
+        has_obj_word = any(w in user_instruction for w in _OBJECT_TYPE_MAP_ZH)
+        if has_obj_word:
+            zh_loose = _re.compile(_num + r"\s*个\s*" + _ZH_COLOUR_RE)
+            # Determine default type from context
+            default_type = "box"
+            for ot in _ZH_OBJ_TYPES_SORTED:
+                if ot in user_instruction:
+                    default_type = _OBJECT_TYPE_MAP_ZH[ot]
+                    break
+            for m in zh_loose.finditer(user_instruction):
+                colour = _COLOUR_MAP_ZH.get(m.group(2))
+                key = (default_type, colour)
+                if key not in {(t, c) for _, t, c in specs}:
+                    specs.append((_zh_to_int(m.group(1)), default_type, colour))
+
+    # ── Pattern D: "一个黑色的积木/球/瓶子" ──────────────────────────
+    zh_pat_de = _re.compile(
+        _num + r"\s*个\s*" + _ZH_COLOUR_RE + r"\s*的\s*" + _ZH_OBJ_RE,
+        _re.IGNORECASE,
+    )
+    for m in zh_pat_de.finditer(user_instruction):
+        colour = _COLOUR_MAP_ZH.get(m.group(2))
+        obj_type = _OBJECT_TYPE_MAP_ZH.get(m.group(3), "box")
+        key = (obj_type, colour)
+        if key not in {(t, c) for _, t, c in specs}:
+            specs.append((_zh_to_int(m.group(1)), obj_type, colour))
+
+    # ── English: "3 red cubes", "2 blue balls", "1 bottle" ──────────
+    en_colour_re = r"(red|green|blue|orange|yellow|black|white)"
+    en_obj_re = r"(cubes?|boxes?|blocks?|balls?|spheres?|cylinders?|bottles?|cans?|cones?)"
+    en_pat = _re.compile(r"(\d+)\s+" + en_colour_re + r"\s+" + en_obj_re, _re.IGNORECASE)
+    for m in en_pat.finditer(user_instruction):
+        colour = _COLOUR_MAP_EN.get(m.group(2).lower())
+        obj_type = _OBJECT_TYPE_MAP_EN.get(m.group(3).lower(), "box")
+        key = (obj_type, colour)
+        if key not in {(t, c) for _, t, c in specs}:
+            specs.append((int(m.group(1)), obj_type, colour))
+
+    # English no-colour: "3 bottles", "1 can"
+    en_pat_nc = _re.compile(r"(\d+)\s+" + en_obj_re, _re.IGNORECASE)
+    for m in en_pat_nc.finditer(user_instruction):
+        obj_type = _OBJECT_TYPE_MAP_EN.get(m.group(2).lower(), "box")
+        if not any(t == obj_type for _, t, _ in specs):
+            specs.append((int(m.group(1)), obj_type, None))
+
+    if not specs:
+        return []
+
+    # Detect "多种颜色" / "多色" / "不同颜色" / "不同的颜色" → auto-assign colours
+    _multi_colour = bool(_re.search(r"多[种]?[颜]?色|不同[的]?[颜]?色|各[种]?颜色", user_instruction))
+    _COLOUR_CYCLE = ["red", "green", "blue", "orange", "yellow", "black",
+                     "white", "pink", "purple", "gray", "brown", "cyan"]
+
+    # Build named object list
+    _NON_COLOURABLE = {"bottle", "can", "milk", "bread", "cereal", "lemon"}
+    result: list[dict[str, _Any]] = []
+    type_colour_counters: dict[str, int] = {}
+    for count, obj_type, colour in specs:
+        for i in range(min(count, 10)):
+            actual_colour = colour
+            if actual_colour is None and _multi_colour:
+                actual_colour = _COLOUR_CYCLE[i % len(_COLOUR_CYCLE)]
+            # XML objects have fixed appearance — don't assign colour
+            if obj_type in _NON_COLOURABLE:
+                actual_colour = None
+            base = f"{actual_colour}_{obj_type}" if actual_colour else obj_type
+            type_colour_counters[base] = type_colour_counters.get(base, 0) + 1
+            idx = type_colour_counters[base]
+            name = f"{base}_{idx}"
+            spec_dict: dict[str, _Any] = {"name": name, "type": obj_type}
+            if actual_colour:
+                spec_dict["colour"] = actual_colour
+            result.append(spec_dict)
+
+    return result[:30]
+
+
+_MULTI_TURN_PROMPT = """\
+The previously generated code has been executed. Here are the results:
+
+{executed_code}
+
+Console stdout:
+{console_stdout}
+
+Console stderr:
+{console_stderr}
+
+Analyze the execution results and the grasp history (appended below if any grasps were attempted). \
+If grasps FAILED (object stayed on table while gripper lifted), adjust your strategy:
+- Shift grasp XY position slightly toward the object center
+- Lower z_approach for a more precise descent (e.g. 0.05 instead of 0.1)
+- Use pick_object(object_name) which auto-retries with random XY offsets
+- Ensure the gripper is fully open before approaching
+
+If there were errors or the task was not completed correctly, generate corrected Python code. \
+Only use objects listed in the original prompt — do NOT create or reference extra objects."""
+
+
+_LLM_PARSE_PROMPT = """\
+You are a structured data extractor. Given a user's environment description, output a JSON array of object specs.
+
+Each object is a dict with keys:
+- "name": str — format: {colour}_{type}_{index} (e.g. "red_box_1", "bottle_2")
+- "type": str — one of: box, ball, cylinder, cone, bottle, can, milk, bread, cereal, lemon
+- "colour": str (optional) — one of: red, green, blue, orange, yellow, black, white, pink, purple, gray, brown, cyan
+
+Rules:
+- "box" = cube/block/积木/方块, "ball" = sphere/球, "cylinder" = 柱体/圆柱, "cone" = 锥体/圆锥
+- "bottle/can/milk/bread/cereal/lemon" are fixed-mesh objects with FIXED appearance — do NOT assign colour to them (they always look the same regardless). Name them as type_index (e.g. "bottle_1", "can_2")
+- Only box, ball, cylinder, cone support custom colours
+- If the user says "多种颜色" or "不同颜色" or "various colours", assign different colours ONLY to colourable types (box/ball/cylinder/cone)
+- Maximum 30 objects total
+- Output ONLY the JSON array, no explanation, no markdown fences
+
+User's environment description:
+{instruction}"""
+
+
+def _llm_parse_object_specs(
+    user_instruction: str, server_url: str, model: str
+) -> list[dict[str, _Any]]:
+    """Use an LLM to parse environment description into object specs.
+
+    Falls back to empty list on any failure.
+    """
+    import requests as _requests
+
+    prompt_text = _LLM_PARSE_PROMPT.format(instruction=user_instruction)
+    payload = {
+        "model": model,
+        "temperature": 0.0,
+        "max_tokens": 2048,
+        "messages": [
+            {"role": "system", "content": "You output only valid JSON arrays."},
+            {"role": "user", "content": prompt_text},
+        ],
+    }
+
+    try:
+        resp = _requests.post(
+            server_url,
+            headers={"Content-Type": "application/json"},
+            data=json.dumps(payload),
+            timeout=30,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        content = body["choices"][0]["message"]["content"]
+
+        # Strip possible markdown fences
+        content = content.strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1] if "\n" in content else content[3:]
+        if content.endswith("```"):
+            content = content[: content.rfind("```")]
+        content = content.strip()
+
+        specs = json.loads(content)
+        if not isinstance(specs, list):
+            return []
+
+        _VALID_TYPES = {"box", "ball", "cylinder", "cone", "bottle", "can",
+                        "milk", "bread", "cereal", "lemon"}
+        _VALID_COLOURS = {"red", "green", "blue", "orange", "yellow", "black",
+                          "white", "pink", "purple", "gray", "brown", "cyan"}
+
+        result: list[dict[str, _Any]] = []
+        for s in specs[:30]:
+            if not isinstance(s, dict) or "name" not in s or "type" not in s:
+                continue
+            if s["type"] not in _VALID_TYPES:
+                continue
+            clean: dict[str, _Any] = {"name": s["name"], "type": s["type"]}
+            if s.get("colour") in _VALID_COLOURS:
+                clean["colour"] = s["colour"]
+            result.append(clean)
+
+        return result
+
+    except Exception as exc:
+        logger.warning(f"LLM object spec parsing failed: {exc}")
+        return []
+
+
+def _build_multi_object_prompt(
+    object_specs: list[dict[str, _Any]], user_instruction: str
+) -> str:
+    """Build a task prompt listing available objects."""
+    lines = []
+    for spec in object_specs:
+        display_type = _TYPE_DISPLAY.get(spec["type"], spec["type"])
+        colour = spec.get("colour", "")
+        desc = f"{colour + ' ' if colour else ''}{display_type}"
+        lines.append(f'- "{spec["name"]}" ({desc})')
+    object_list = "\n".join(lines)
+
+    task_part = user_instruction
+    for marker in ["[任务指令]", "[Task]"]:
+        if marker in user_instruction:
+            task_part = user_instruction.split(marker, 1)[1].strip()
+            break
+
+    return f"""You are controlling a Franka Emika robot with the API described below.
+
+Environment objects on the table:
+{object_list}
+
+Task: {task_part}
+
+Rules:
+- PREFER pick_object("object name") for picking — it handles retries and logs grasp results automatically.
+- Use get_object_pose("object name", return_bbox_extent=True) to get the position, quaternion, and bounding box of an object.
+- Use sample_grasp_pose("object name") to get a grasp pose for an object.
+- Use goto_pose(position, quaternion_wxyz, z_approach=0.1) to move the gripper.
+- Use open_gripper() and close_gripper() to control the gripper.
+- Use is_grasping("object name") after lifting to verify grasp success.
+- The extent from get_object_pose(..., return_bbox_extent=True) is the FULL side length. Use extent[2]/2 for half-height.
+- For placement orientation, reuse the grasp quaternion from sample_grasp_pose. Do NOT use the quaternion from get_object_pose (it is unreliable for orientation).
+- Always use z_approach=0.1 when approaching an object for grasping or placing.
+- After grasping, lift the object to a safe height (at least +0.15m in Z) before moving laterally to the placement location.
+- Object names must match EXACTLY as listed above (e.g. "red_box_1", not "red cube" or "box 1").
+
+IMPORTANT: Only use the exact object names listed in "Environment objects" above. Do NOT invent or reference other object names."""
+
+
+def _build_layered_prompt(
+    object_specs: list[dict[str, _Any]],
+    user_instruction: str,
+    code_hint: str | None = None,
+) -> str:
+    """Build a layered prompt: raw instructions + object catalog + API toolkit.
+
+    The local code does minimal processing — the LLM interprets user intent,
+    maps it to available objects, and composes API calls from examples.
+    """
+
+    # ── Layer 1: raw user instruction, passed verbatim ─────────────────
+    layer1 = f"""\
+═══════════════════════════════════════════════════════════
+LAYER 1 — USER INSTRUCTIONS (原始用户指令)
+═══════════════════════════════════════════════════════════
+
+{user_instruction}
+"""
+
+    # ── Layer 2: object catalog ────────────────────────────────────────
+    #   2a: what's already on the table (if parsed)
+    #   2b: full type/colour reference so the LLM understands the format
+    if object_specs:
+        inv_lines = []
+        for spec in object_specs:
+            display_type = _TYPE_DISPLAY.get(spec["type"], spec["type"])
+            colour = spec.get("colour", "")
+            label = f"{colour + ' ' if colour else ''}{display_type}"
+            inv_lines.append(f'  "{spec["name"]}"  —  {label}')
+        inventory = "\n".join(inv_lines)
+    else:
+        inventory = "  (no objects were parsed from the instruction; the default environment is used)"
+
+    layer2 = f"""\
+═══════════════════════════════════════════════════════════
+LAYER 2 — ENVIRONMENT OBJECT REFERENCE (物体参考手册)
+═══════════════════════════════════════════════════════════
+
+### Objects currently on the table
+{inventory}
+
+### Supported object types catalog
+Each object is described as a dict:  {{"name": str, "type": str, "colour": str (optional)}}
+
+| type     | accepts colour? | description          | example spec                                                     |
+|----------|----------------|----------------------|------------------------------------------------------------------|
+| box      | yes            | cube / block         | {{"name": "red_box_1",    "type": "box",      "colour": "red"}}    |
+| ball     | yes            | sphere               | {{"name": "blue_ball_1",  "type": "ball",     "colour": "blue"}}   |
+| cylinder | yes            | cylinder             | {{"name": "green_cylinder_1", "type": "cylinder", "colour": "green"}} |
+| cone     | yes            | cone                 | {{"name": "yellow_cone_1", "type": "cone",   "colour": "yellow"}}  |
+| bottle   | no             | bottle (fixed mesh)  | {{"name": "bottle_1",     "type": "bottle"}}                       |
+| can      | no             | soda can (fixed mesh)| {{"name": "can_1",        "type": "can"}}                          |
+| milk     | no             | milk carton          | {{"name": "milk_1",       "type": "milk"}}                         |
+| bread    | no             | bread loaf           | {{"name": "bread_1",      "type": "bread"}}                        |
+| cereal   | no             | cereal box           | {{"name": "cereal_1",     "type": "cereal"}}                       |
+| lemon    | no             | lemon                | {{"name": "lemon_1",      "type": "lemon"}}                        |
+
+### Supported colours
+red, green, blue, orange, yellow, black, white, pink, purple, gray, brown, cyan
+
+### Naming convention
+  colour_type_index  →  e.g. "red_box_1", "blue_ball_2", "bottle_1"
+  Objects without colour: type_index  →  e.g. "bottle_1", "can_2"
+
+### Important
+- bottle/can/milk/bread/cereal/lemon have FIXED appearance (always the same colour). Do NOT try to distinguish them by colour.
+- To identify objects, use their NAME (e.g. "bottle_1", "bottle_2"), not their colour.
+- In your code, identify objects ONLY by name. The colour information is encoded in the name for colourable objects (e.g. "red_box_1" is red).
+"""
+
+    # ── Layer 3: API toolkit with composition patterns ─────────────────
+    layer3 = """\
+═══════════════════════════════════════════════════════════
+LAYER 3 — API TOOLKIT (可用操作原语与组合样例)
+═══════════════════════════════════════════════════════════
+
+### Primitive functions
+
+1. get_object_pose(object_name: str, return_bbox_extent: bool = False)
+   → Returns (position, quaternion_wxyz, bbox_extent)
+   - position: np.ndarray (3,) — XYZ in meters
+   - quaternion_wxyz: np.ndarray (4,) — NOTE: orientation may be unreliable, prefer sample_grasp_pose for gripper orientation
+   - bbox_extent: np.ndarray (3,) — full side lengths [x, y, z] in meters (only when return_bbox_extent=True)
+
+2. sample_grasp_pose(object_name: str)
+   → Returns (position, quaternion_wxyz)
+   - A reliable top-down grasp pose; always use this quaternion for gripper orientation
+
+3. goto_pose(position: np.ndarray, quaternion_wxyz: np.ndarray, z_approach: float = 0.0)
+   → Moves gripper to target pose
+   - z_approach > 0: first arrives at position + z_approach offset, then descends (for precise approach)
+   - No need to call goto_pose a second time after using z_approach
+
+4. open_gripper()  → Opens gripper fully
+5. close_gripper() → Closes gripper fully
+
+6. pick_object(object_name: str, max_attempts: int = 3) → bool
+   - High-level pick-up with AUTOMATIC RETRY on grasp failure
+   - Returns True if object was successfully grasped, False if all attempts failed
+   - Internally: sample_grasp_pose → open → goto → close → lift → verify → retry if needed
+   - **PREFERRED over manual pick sequences**
+
+7. is_grasping(object_name: str) → bool
+   - Check if the named object is currently held by the gripper
+   - Call after close_gripper() and lifting to verify grasp success
+
+8. get_grasp_history(object_name: str | None = None) → list[dict]
+   - Returns past grasp attempts from the log (all or filtered by object_name)
+   - Each entry has: object_name, object_type, grasp_pos, success, attempt, gripper_z_after_lift, object_z_after_lift
+   - Use to analyze which objects failed and adjust strategy (e.g. different approach offsets)
+
+### Composition patterns
+
+**Pattern A — Pick with retry (PREFERRED):**
+```python
+success = pick_object("red_box_1")
+if not success:
+    print("Failed to pick red_box_1 after retries, skipping")
+```
+
+**Pattern A2 — Manual pick (if you need custom approach):**
+```python
+import numpy as np
+pos, quat = sample_grasp_pose("red_box_1")
+open_gripper()
+goto_pose(pos, quat, z_approach=0.1)
+close_gripper()
+lift = pos.copy(); lift[2] += 0.15
+goto_pose(lift, quat)
+if not is_grasping("red_box_1"):
+    open_gripper()  # failed — release and retry or skip
+```
+
+**Pattern B — Place at a location:**
+```python
+goto_pose(target_pos, quat, z_approach=0.1)  # descend to target
+open_gripper()
+lift = target_pos.copy(); lift[2] += 0.2
+goto_pose(lift, quat)                        # retract upward
+```
+
+**Pattern C — Pick-and-place (full workflow):**
+```python
+# 1. Pick A with retry
+success = pick_object("red_box_1")
+if not success:
+    print("Skipping red_box_1")
+else:
+    # 2. Compute placement on top of B
+    pos_b, _, extent_b = get_object_pose("green_box_1", return_bbox_extent=True)
+    place = pos_b.copy()
+    place[2] += extent_b[2] / 2 + 0.02          # half-height of B + margin
+
+    # 3. Place (use Pattern B) — use grasp quat
+    _, quat = sample_grasp_pose("red_box_1")
+    goto_pose(place, quat, z_approach=0.1)
+    open_gripper()
+```
+
+### Key constraints
+- Use pick_object() for picking — it handles retries and logs grasp results automatically
+- z_approach=0.1 for all grasping/placing approaches
+- Lift +0.15m in Z after grasping before any lateral movement
+- Use quaternion from sample_grasp_pose for orientation (NOT from get_object_pose)
+- Object names must match EXACTLY as listed in Layer 2
+- ONLY operate on objects listed in Layer 2 — do NOT create, spawn, or reference objects not in the catalog
+- Output ONLY executable Python code, no markdown fences
+
+═══════════════════════════════════════════════════════════
+Based on the 3 layers above, write Python code to accomplish the user's task.
+═══════════════════════════════════════════════════════════
+"""
+
+    hint_section = ""
+    if code_hint and code_hint.strip():
+        hint_section = f"""
+═══════════════════════════════════════════════════════════
+ADDITIONAL CONSTRAINTS (用户额外约束)
+═══════════════════════════════════════════════════════════
+{code_hint.strip()}
+"""
+
+    return layer1 + "\n" + layer2 + "\n" + layer3 + hint_section
+
 
 # ---------------------------------------------------------------------------
 # Viser reverse-proxy helpers
@@ -284,6 +857,61 @@ def create_app() -> FastAPI:
             session.config = config
             session.env_factory = env_factory
             session.state = SessionState.LOADING_CONFIG
+
+            # Ensure the configured API is actually registered; fall back to
+            # the always-available privileged API if not.
+            from capx.integrations.base_api import list_apis as _list_apis
+            _registered = set(_list_apis())
+            cfg_apis = session.env_factory.get("cfg", {}).get("apis", [])
+            if cfg_apis and any(a not in _registered for a in cfg_apis):
+                logger.warning(
+                    f"Configured apis {cfg_apis} not all registered (available: {sorted(_registered)}). "
+                    "Falling back to FrankaControlPrivilegedApi."
+                )
+                session.env_factory["cfg"]["apis"] = ["FrankaControlPrivilegedApi"]
+
+            # Override task prompt with user instruction if provided
+            # We APPEND the user instruction to the class default prompt so the LLM
+            # still sees API rules, valid object names, and constraints.
+            if request.user_instruction:
+                logger.info(f"user_instruction received ({len(request.user_instruction)} chars): {request.user_instruction[:300]}")
+                object_specs = _parse_object_specs(request.user_instruction)
+                logger.info(f"Regex parsed object_specs: {object_specs}")
+
+                # Fall back to LLM-based parsing if regex found nothing
+                if not object_specs:
+                    logger.info("Regex parser returned empty, trying LLM-based parsing...")
+                    object_specs = await asyncio.to_thread(
+                        _llm_parse_object_specs,
+                        request.user_instruction,
+                        request.server_url,
+                        request.model,
+                    )
+                    logger.info(f"LLM parsed object_specs ({len(object_specs)}): {object_specs}")
+
+                if object_specs:
+                    logger.info(f"Parsed {len(object_specs)} objects from user instruction")
+                    session.env_factory["_target_"] = (
+                        "capx.envs.tasks.franka.franka_multi_cube.FrankaMultiCubeCodeEnv"
+                    )
+                    session.env_factory["cfg"]["low_level"] = {
+                        "_target_": "capx.envs.simulators.robosuite_multi_objects.FrankaRobosuiteMultiObjectsLowLevel",
+                        "object_specs": object_specs,
+                        "privileged": True,
+                        "enable_render": True,
+                    }
+                    session.env_factory["cfg"]["apis"] = ["FrankaControlPrivilegedApi"]
+                    prompt = _build_layered_prompt(object_specs, request.user_instruction, request.code_hint)
+                    session.env_factory["cfg"]["prompt"] = prompt
+                    logger.info(f"Layered prompt ({len(prompt)} chars): ...{prompt[-200:]}")
+                else:
+                    prompt = _build_layered_prompt([], request.user_instruction, request.code_hint)
+                    session.env_factory["cfg"]["prompt"] = prompt
+                    logger.info(f"Layered prompt (no objects) ({len(prompt)} chars): ...{prompt[-200:]}")
+
+                session.env_factory["cfg"]["multi_turn_prompt"] = _MULTI_TURN_PROMPT
+            else:
+                logger.info("No user_instruction in request")
 
             # Build launch args for trial runner
             trial_args = LaunchArgsCompat(

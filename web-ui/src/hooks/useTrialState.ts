@@ -327,6 +327,16 @@ export function useTrialState(): UseTrialStateReturn {
           });
           break;
 
+        case 'grasp_analysis':
+          addMessage({
+            type: 'grasp_analysis',
+            timestamp: event.timestamp,
+            graspAttempts: event.attempts,
+            graspSuccesses: event.successes,
+            graspFailures: event.failures,
+          });
+          break;
+
         case 'user_prompt_request':
           addMessage({
             type: 'system',

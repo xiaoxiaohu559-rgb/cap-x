@@ -159,6 +159,16 @@ class ImageAnalysisEvent(WSEventBase):
     model_used: str | None = None
 
 
+class GraspAnalysisEvent(WSEventBase):
+    """Emitted with grasp attempt analysis after code execution."""
+
+    type: str = "grasp_analysis"
+    total_attempts: int
+    successes: int
+    failures: int
+    attempts: list[dict]  # [{object_name, attempt, success, grasp_pos, ...}]
+
+
 class UserPromptRequestEvent(WSEventBase):
     """Emitted when waiting for user input."""
 
@@ -273,6 +283,8 @@ class StartTrialRequest(BaseModel):
     visual_differencing_model_server_url: str | None = "http://127.0.0.1:8110/chat/completions"
     await_user_input_each_turn: bool = False
     execution_timeout: int = 180  # seconds per code block execution
+    user_instruction: str | None = None
+    code_hint: str | None = None
 
 
 class StartTrialResponse(BaseModel):

@@ -1,6 +1,15 @@
 import time
+from urllib.parse import urlparse
 
 import requests
+
+
+def _is_local(url: str) -> bool:
+    host = urlparse(url).hostname or ""
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
+_NO_PROXY = {"http": None, "https": None}
 
 
 def post_with_retries(
@@ -24,12 +33,13 @@ def post_with_retries(
     """
     deadline = time.time() + timeout_seconds
     current_interval = retry_interval
+    proxies = _NO_PROXY if _is_local(url) else None
 
     last_err = None
     attempts = 0
     while time.time() < deadline and attempts < max_retries:
         try:
-            resp = requests.post(url, json=payload, timeout=timeout_seconds)
+            resp = requests.post(url, json=payload, timeout=timeout_seconds, proxies=proxies)
             resp.raise_for_status()
             return resp.json()
         except requests.RequestException as e:
@@ -69,12 +79,13 @@ def post_with_queue_tolerance(
     """
     deadline = time.time() + timeout_seconds
     current_interval = retry_interval
+    proxies = _NO_PROXY if _is_local(url) else None
 
     last_err = None
     attempts = 0
     while time.time() < deadline and attempts < max_retries:
         try:
-            resp = requests.post(url, json=payload, timeout=timeout_seconds)
+            resp = requests.post(url, json=payload, timeout=timeout_seconds, proxies=proxies)
             if resp.status_code == 503:
                 # Server is busy / model not ready -- treat as transient
                 last_err = requests.HTTPError(

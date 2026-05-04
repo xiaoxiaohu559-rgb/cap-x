@@ -27,6 +27,8 @@ function categoryLabel(key: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+export type InputMode = 'config' | 'text';
+
 interface ConfigStartControlProps {
   state: SessionState;
   configPath: string | null;
@@ -39,6 +41,8 @@ interface ConfigStartControlProps {
   serverUrl: string;
   temperature: number;
   awaitUserInput: boolean;
+  inputMode: InputMode;
+  onInputModeChange: (mode: InputMode) => void;
 }
 
 export function ConfigStartControl({
@@ -53,6 +57,8 @@ export function ConfigStartControl({
   serverUrl,
   temperature,
   awaitUserInput,
+  inputMode,
+  onInputModeChange,
 }: ConfigStartControlProps) {
   const [configs, setConfigs] = useState<ConfigEntry[]>([]);
   const [selectedConfig, setSelectedConfig] = useState<string>('');
@@ -68,7 +74,6 @@ export function ConfigStartControl({
       .then((res) => res.json())
       .then((data) => {
         const raw = data.configs || [];
-        // Support both old format (string[]) and new format (ConfigEntry[])
         const entries: ConfigEntry[] = raw.map((c: string | ConfigEntry) =>
           typeof c === 'string' ? { path: c, available: true } : c
         );
@@ -77,7 +82,6 @@ export function ConfigStartControl({
       .catch((err) => console.error('Failed to fetch configs:', err));
   }, []);
 
-  // Sync external configPath with local selectedConfig
   useEffect(() => {
     if (configPath && selectedConfig !== configPath) {
       setSelectedConfig(configPath);
@@ -108,84 +112,110 @@ export function ConfigStartControl({
     });
   };
 
-  const handleNewTrial = () => {
-    reset();
-  };
-
   return (
     <div className="flex items-center gap-2">
-      {/* Config Selector */}
-      <div className="relative">
-        <select
-          value={selectedConfig}
-          onChange={(e) => handleConfigChange(e.target.value)}
-          disabled={isRunning || loading}
-          className="appearance-none pl-3 pr-8 py-1.5 bg-surface-sunken border border-surface-border rounded-md text-sm text-text-primary min-w-0 sm:min-w-[280px] w-full sm:w-auto focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent disabled:opacity-50 transition-colors cursor-pointer"
+      {/* Mode Toggle */}
+      <div className="flex rounded-md border border-surface-border overflow-hidden flex-shrink-0">
+        <button
+          onClick={() => onInputModeChange('text')}
+          disabled={isRunning}
+          className={`px-2.5 py-1 text-xs font-display font-medium transition-colors ${
+            inputMode === 'text'
+              ? 'bg-accent text-black'
+              : 'bg-surface-sunken text-text-tertiary hover:text-text-secondary'
+          } disabled:opacity-50`}
         >
-          <option value="">Select a config...</option>
-          {[...grouped.entries()].map(([category, entries]) => (
-            <optgroup key={category} label={categoryLabel(category)}>
-              {entries.map((config) => (
-                <option
-                  key={config.path}
-                  value={config.path}
-                  disabled={!config.available}
-                >
-                  {config.label
-                    ? `${config.label} — ${config.path.split('/').pop()?.replace('.yaml', '')}`
-                    : config.path.split('/').pop()?.replace('.yaml', '')}
-                  {!config.available && config.reason ? ` (${config.reason})` : ''}
-                </option>
-              ))}
-            </optgroup>
-          ))}
-        </select>
-        {/* Custom dropdown arrow or spinner */}
-        <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-text-tertiary">
-          {loading ? (
-            <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-            </svg>
-          ) : (
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-            </svg>
-          )}
-        </div>
+          文本指令
+        </button>
+        <button
+          onClick={() => onInputModeChange('config')}
+          disabled={isRunning}
+          className={`px-2.5 py-1 text-xs font-display font-medium transition-colors border-l border-surface-border ${
+            inputMode === 'config'
+              ? 'bg-accent text-black'
+              : 'bg-surface-sunken text-text-tertiary hover:text-text-secondary'
+          } disabled:opacity-50`}
+        >
+          配置选择
+        </button>
       </div>
 
-      {/* Action Buttons */}
-      {canStart && configPath && !loading && (
-        <button
-          onClick={state === 'complete' || state === 'error' ? handleNewTrial : handleStart}
-          className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-accent text-black rounded-md text-sm font-display font-bold tracking-wide hover:bg-accent-light hover:shadow-accent/30 active:scale-[0.98] transform disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-lg shadow-accent/20"
-        >
-          {state === 'complete' ? (
-            <>
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-              </svg>
-              New Trial
-            </>
-          ) : state === 'error' ? (
-            <>
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-              </svg>
-              Retry
-            </>
-          ) : (
-            <>
-              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
-              </svg>
-              Start Trial
-            </>
+      {/* Config Selector — only in config mode */}
+      {inputMode === 'config' && (
+        <>
+          <div className="relative">
+            <select
+              value={selectedConfig}
+              onChange={(e) => handleConfigChange(e.target.value)}
+              disabled={isRunning || loading}
+              className="appearance-none pl-3 pr-8 py-1.5 bg-surface-sunken border border-surface-border rounded-md text-sm text-text-primary min-w-0 sm:min-w-[280px] w-full sm:w-auto focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent disabled:opacity-50 transition-colors cursor-pointer"
+            >
+              <option value="">Select a config...</option>
+              {[...grouped.entries()].map(([category, entries]) => (
+                <optgroup key={category} label={categoryLabel(category)}>
+                  {entries.map((config) => (
+                    <option
+                      key={config.path}
+                      value={config.path}
+                      disabled={!config.available}
+                    >
+                      {config.label
+                        ? `${config.label} — ${config.path.split('/').pop()?.replace('.yaml', '')}`
+                        : config.path.split('/').pop()?.replace('.yaml', '')}
+                      {!config.available && config.reason ? ` (${config.reason})` : ''}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+            <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-text-tertiary">
+              {loading ? (
+                <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                </svg>
+              ) : (
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              )}
+            </div>
+          </div>
+
+          {/* Start / New Trial / Retry — config mode only */}
+          {canStart && configPath && !loading && (
+            <button
+              onClick={state === 'complete' || state === 'error' ? reset : handleStart}
+              className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-accent text-black rounded-md text-sm font-display font-bold tracking-wide hover:bg-accent-light hover:shadow-accent/30 active:scale-[0.98] transform transition-colors shadow-lg shadow-accent/20"
+            >
+              {state === 'complete' ? (
+                <>
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                  New Trial
+                </>
+              ) : state === 'error' ? (
+                <>
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                  Retry
+                </>
+              ) : (
+                <>
+                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
+                  </svg>
+                  Start Trial
+                </>
+              )}
+            </button>
           )}
-        </button>
+        </>
       )}
 
+      {/* Stop button — both modes */}
       {isRunning && (
         <button
           onClick={stopTrial}
@@ -198,8 +228,8 @@ export function ConfigStartControl({
         </button>
       )}
 
-      {/* Clear button after completion */}
-      {(state === 'complete' || state === 'error') && (
+      {/* Clear button after completion — config mode only */}
+      {inputMode === 'config' && (state === 'complete' || state === 'error') && (
         <button
           onClick={reset}
           className="p-1.5 text-text-tertiary hover:text-accent hover:bg-surface-overlay rounded-md transition-colors"

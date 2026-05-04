@@ -93,6 +93,26 @@ export interface ImageAnalysisEvent extends WSEventBase {
   model_used?: string;
 }
 
+export interface GraspAnalysisEvent extends WSEventBase {
+  type: 'grasp_analysis';
+  total_attempts: number;
+  successes: number;
+  failures: number;
+  attempts: GraspAttempt[];
+}
+
+export interface GraspAttempt {
+  object_name: string;
+  object_type?: string;
+  object_pos?: number[] | null;
+  grasp_pos: number[];
+  grasp_quat?: number[];
+  success: boolean;
+  attempt: number;
+  gripper_z_after_lift?: number | null;
+  object_z_after_lift?: number | null;
+}
+
 export interface ExecutionStepEvent extends WSEventBase {
   type: 'execution_step';
   block_index: number;
@@ -143,6 +163,7 @@ export type WSEvent =
   | VisualFeedbackEvent
   | ExecutionStepEvent
   | ImageAnalysisEvent
+  | GraspAnalysisEvent
   | UserPromptRequestEvent
   | TrialCompleteEvent
   | StateUpdateEvent
@@ -202,6 +223,8 @@ export interface StartTrialRequest {
   visual_differencing_model_server_url?: string | null;
   await_user_input_each_turn?: boolean;
   execution_timeout?: number;
+  user_instruction?: string;
+  code_hint?: string;
 }
 
 export interface StartTrialResponse {
@@ -223,6 +246,7 @@ export type ChatMessageType =
   | 'execution_step'
   | 'visual_feedback'
   | 'image_analysis'
+  | 'grasp_analysis'
   | 'user_prompt'
   | 'error'
   | 'completion';
@@ -267,4 +291,8 @@ export interface ChatMessage {
   executionSteps?: ExecutionStepData[];  // Array of steps for the current code block
   toolName?: string;  // For individual execution step (single event)
   stepImages?: string[];  // Images for execution step
+  // Grasp analysis fields
+  graspAttempts?: GraspAttempt[];
+  graspSuccesses?: number;
+  graspFailures?: number;
 }

@@ -173,16 +173,25 @@ def _extract_code(content: str) -> list[str]:
     """
     fence_start = "```python\n"
     fence_end = "```"
-    start_idx = 0
-    end_idx = len(content) + 1
+
+    # If a ```python fence exists, extract everything between fences
     if fence_start in content:
         start_idx = content.find(fence_start) + len(fence_start)
         content = content[start_idx:]
-    if fence_end in content:
-        end_idx = content.rfind(fence_end)
-        content = content[:end_idx]
+        if fence_end in content:
+            content = content[:content.rfind(fence_end)]
+    elif content.lstrip().startswith("```"):
+        # Bare ``` at the start — skip the first line
+        first_line_end = content.find("\n", content.index("```"))
+        if first_line_end != -1:
+            content = content[first_line_end + 1:]
+        if fence_end in content:
+            content = content[:content.rfind(fence_end)]
 
-    content = content.strip()
+    # Remove any remaining ``` lines (LLMs sometimes emit multiple blocks)
+    lines = content.split("\n")
+    cleaned = [ln for ln in lines if not ln.strip().startswith("```")]
+    content = "\n".join(cleaned).strip()
 
     # If content doesn't parse as Python, try to extract code more aggressively.
     # LLMs sometimes prepend explanatory text before the actual code.
@@ -416,7 +425,7 @@ def _save_trial_artifacts(
         return None
     trial_dir = (
         Path(config["output_dir"])
-        / f"trial_{trial:02d}_sandboxrc_{sandbox_rc}_reward_{reward:.3f}_taskcompleted_{int(task_completed)}"
+        / f"trial_{trial:02d}_sandboxrc_{sandbox_rc}_reward_{reward:.3f}_taskcompleted_{int(task_completed or False)}"
     )
     trial_dir.mkdir(parents=True, exist_ok=True)
 

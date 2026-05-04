@@ -40,7 +40,7 @@ def init_pyroki(
             "prev_cfg": prev_cfg.tolist() if prev_cfg is not None else None,
         }
 
-        data = post_with_retries(f"{server_url}/ik", payload, timeout_seconds=15.0)
+        data = post_with_retries(f"{server_url}/ik", payload, timeout_seconds=10.0, max_retries=3)
         joints = np.asarray(data["joint_positions"], dtype=np.float32)
 
         return joints
